@@ -150,4 +150,9 @@ public class Snake : MonoBehaviour
         transform.position = Vector3.zero;
         direction = Vector2.right;
     }
+    public List<Transform> GetSegments()
+    {
+        return segments;
+    }
+
 }
