@@ -1,145 +1,166 @@
 using System.Collections.Generic;
 using UnityEngine;
 
+[RequireComponent(typeof(Snake))]
 public class SnakeAI : MonoBehaviour
 {
     private Snake snake;
     private GameManager gm;
-    private int gridStep = 1;
 
     void Start()
     {
         snake = GetComponent<Snake>();
         gm = FindFirstObjectByType<GameManager>();
-        InvokeRepeating(nameof(UpdateAIMove), 0.1f, snake.moveRate);
     }
 
-    void UpdateAIMove()
+    void Update()
     {
-        if (!snake.enabled) return;
-        if (snake == null || gm == null) return;
+        if (gm == null || gm.gridArea == null) return;
 
+        // Find food position
         GameObject food = GameObject.FindGameObjectWithTag("Food");
         if (food == null) return;
 
-        Vector2 start = RoundVector(snake.transform.position);
-        Vector2 goal = RoundVector(food.transform.position);
+        Vector2Int headPos = Vector2Int.RoundToInt(snake.transform.position);
+        Vector2Int foodPos = Vector2Int.RoundToInt(food.transform.position);
 
-        // Run A* pathfinding
-        List<Vector2> path = FindPath(start, goal);
-        if (path == null || path.Count < 2) return;
+        List<Vector2Int> bodyPositions = new List<Vector2Int>();
+        foreach (var seg in snake.GetSegments())
+            bodyPositions.Add(Vector2Int.RoundToInt(seg.position));
 
-        Vector2 nextCell = path[1]; // next cell to move into
-        Vector2 moveDir = (nextCell - start).normalized;
+        // 1. Try to find a path to food
+        List<Vector2Int> pathToFood = FindPath(headPos, foodPos, bodyPositions);
 
-        // Prevent reversing into itself
-        if (moveDir == -snake.GetDirection()) return;
-
-        snake.SetDirection(moveDir);
-    }
-
-    Vector2 RoundVector(Vector3 v)
-    {
-        return new Vector2(Mathf.Round(v.x), Mathf.Round(v.y));
-    }
-
-    // -------------------------------
-    //        A* Pathfinding
-    // -------------------------------
-    List<Vector2> FindPath(Vector2 start, Vector2 goal)
-    {
-        Bounds b = gm.gridArea.bounds;
-
-        var open = new List<Node>();
-        var closed = new HashSet<Vector2>();
-        var cameFrom = new Dictionary<Vector2, Vector2>();
-        var gScore = new Dictionary<Vector2, float>();
-        var fScore = new Dictionary<Vector2, float>();
-
-        open.Add(new Node(start, 0, Heuristic(start, goal)));
-        gScore[start] = 0;
-        fScore[start] = Heuristic(start, goal);
-
-        // Record snake body positions to avoid
-        HashSet<Vector2> blocked = new HashSet<Vector2>();
-        foreach (Transform seg in snake.GetSegments())
-            blocked.Add(RoundVector(seg.position));
-
-        while (open.Count > 0)
+        // 2. Check if that path is safe
+        if (pathToFood != null && IsPathSafe(pathToFood, bodyPositions))
         {
-            // Get lowest fScore node
-            open.Sort((a, b2) => a.f.CompareTo(b2.f));
-            Node current = open[0];
-            open.RemoveAt(0);
-
-            if (current.pos == goal)
-                return ReconstructPath(cameFrom, current.pos);
-
-            closed.Add(current.pos);
-
-            foreach (Vector2 neighbor in GetNeighbors(current.pos, b))
+            // Move toward first step in path
+            if (pathToFood.Count > 1)
             {
-                if (blocked.Contains(neighbor) || closed.Contains(neighbor))
+                Vector2Int nextPos = pathToFood[1];
+                Vector2 dir = (nextPos - headPos);
+                snake.SetDirection(dir);
+            }
+        }
+        else
+        {
+            // 3. Fallback: follow tail or move safely
+            Vector2Int tailPos = bodyPositions[bodyPositions.Count - 1];
+            List<Vector2Int> pathToTail = FindPath(headPos, tailPos, bodyPositions);
+            if (pathToTail != null && pathToTail.Count > 1)
+            {
+                Vector2Int nextPos = pathToTail[1];
+                Vector2 dir = (nextPos - headPos);
+                snake.SetDirection(dir);
+            }
+            else
+            {
+                // last resort: random safe move
+                TryRandomSafeMove(headPos, bodyPositions);
+            }
+        }
+    }
+
+    // ------------------------------------------
+    // PATHFINDING (BFS)
+    // ------------------------------------------
+    List<Vector2Int> FindPath(Vector2Int start, Vector2Int goal, List<Vector2Int> body)
+    {
+        Queue<Vector2Int> q = new Queue<Vector2Int>();
+        Dictionary<Vector2Int, Vector2Int> cameFrom = new Dictionary<Vector2Int, Vector2Int>();
+        q.Enqueue(start);
+        cameFrom[start] = start;
+
+        Bounds b = gm.gridArea.bounds;
+        Vector2Int min = Vector2Int.FloorToInt(b.min);
+        Vector2Int max = Vector2Int.CeilToInt(b.max);
+
+        while (q.Count > 0)
+        {
+            Vector2Int cur = q.Dequeue();
+            if (cur == goal) break;
+
+            foreach (Vector2Int dir in new Vector2Int[] {
+                Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right })
+            {
+                Vector2Int nxt = cur + dir;
+                if (nxt.x < min.x || nxt.x > max.x || nxt.y < min.y || nxt.y > max.y)
                     continue;
+                if (body.Contains(nxt)) continue;
+                if (cameFrom.ContainsKey(nxt)) continue;
 
-                float tentativeG = gScore[current.pos] + 1;
-
-                if (!gScore.ContainsKey(neighbor) || tentativeG < gScore[neighbor])
-                {
-                    cameFrom[neighbor] = current.pos;
-                    gScore[neighbor] = tentativeG;
-                    fScore[neighbor] = tentativeG + Heuristic(neighbor, goal);
-
-                    if (!open.Exists(n => n.pos == neighbor))
-                        open.Add(new Node(neighbor, gScore[neighbor], fScore[neighbor]));
-                }
+                cameFrom[nxt] = cur;
+                q.Enqueue(nxt);
             }
         }
 
-        return null; // no path
-    }
+        if (!cameFrom.ContainsKey(goal)) return null;
 
-    float Heuristic(Vector2 a, Vector2 b)
-    {
-        // Manhattan distance works best for grid movement
-        return Mathf.Abs(a.x - b.x) + Mathf.Abs(a.y - b.y);
-    }
-
-    List<Vector2> ReconstructPath(Dictionary<Vector2, Vector2> cameFrom, Vector2 current)
-    {
-        List<Vector2> totalPath = new List<Vector2> { current };
-        while (cameFrom.ContainsKey(current))
+        // Reconstruct path
+        List<Vector2Int> path = new List<Vector2Int>();
+        Vector2Int temp = goal;
+        while (temp != start)
         {
-            current = cameFrom[current];
-            totalPath.Insert(0, current);
+            path.Insert(0, temp);
+            temp = cameFrom[temp];
         }
-        return totalPath;
+        path.Insert(0, start);
+        return path;
     }
 
-    List<Vector2> GetNeighbors(Vector2 node, Bounds b)
+    // ------------------------------------------
+    // SAFE PATH CHECK
+    // ------------------------------------------
+    bool IsPathSafe(List<Vector2Int> pathToFood, List<Vector2Int> bodyPositions)
     {
-        List<Vector2> neighbors = new List<Vector2>();
-        Vector2[] dirs = { Vector2.up, Vector2.down, Vector2.left, Vector2.right };
+        if (pathToFood == null || pathToFood.Count == 0) return false;
 
-        foreach (var d in dirs)
+        List<Vector2Int> simulatedBody = new List<Vector2Int>(bodyPositions);
+        Vector2Int newHead = pathToFood[pathToFood.Count - 1];
+        Vector2Int tail = simulatedBody[simulatedBody.Count - 1];
+
+        // Simulate snake moving along path (tail follows head)
+        for (int i = 1; i < pathToFood.Count; i++)
         {
-            Vector2 newPos = node + d * gridStep;
-            if (b.Contains(new Vector3(newPos.x, newPos.y, 0)))
-                neighbors.Add(newPos);
+            simulatedBody.Insert(0, pathToFood[i]); // new head
+            simulatedBody.RemoveAt(simulatedBody.Count - 1); // remove tail
         }
 
-        return neighbors;
+        // After simulation, check if new head can reach tail
+        List<Vector2Int> pathToTail = FindPath(newHead, tail, simulatedBody);
+        return pathToTail != null;
     }
 
-    private class Node
+    // ------------------------------------------
+    // RANDOM SAFE MOVE (FALLBACK)
+    // ------------------------------------------
+    void TryRandomSafeMove(Vector2Int head, List<Vector2Int> body)
     {
-        public Vector2 pos;
-        public float g, f;
-        public Node(Vector2 pos, float g, float f)
+        List<Vector2Int> dirs = new List<Vector2Int>
+        { Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right };
+        Shuffle(dirs);
+
+        Bounds b = gm.gridArea.bounds;
+        Vector2Int min = Vector2Int.FloorToInt(b.min);
+        Vector2Int max = Vector2Int.CeilToInt(b.max);
+
+        foreach (Vector2Int d in dirs)
         {
-            this.pos = pos;
-            this.g = g;
-            this.f = f;
+            Vector2Int nxt = head + d;
+            if (nxt.x < min.x || nxt.x > max.x || nxt.y < min.y || nxt.y > max.y)
+                continue;
+            if (body.Contains(nxt)) continue;
+            snake.SetDirection(d);
+            return;
+        }
+    }
+
+    void Shuffle(List<Vector2Int> list)
+    {
+        for (int i = 0; i < list.Count; i++)
+        {
+            int j = Random.Range(i, list.Count);
+            (list[i], list[j]) = (list[j], list[i]);
         }
     }
 }
